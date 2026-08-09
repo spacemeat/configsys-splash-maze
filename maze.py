@@ -10,17 +10,20 @@ the surrounding water rises to it; then it fills, and the fish, now afloat, stop
 swims. The simulation is DONE when the chamber is full.
 
 The pour is stepped FORWARD IN TIME (MazeSim precomputes one frame per step) so it reads as real
-flow: it starts bone dry, the stream is revealed as its front DESCENDS from the inlet, pools rise,
-and — once the surface reaches the chamber door — part of the constant inflow is diverted into the
-chamber (rate-limited, so it fills gradually floor->ceiling) while the outside keeps rising on the
-rest. The precomputed timeline is then played back against inspection progress (eased, rate-capped)
-so the chamber fills just as inspection completes — no added latency, no dead air.
+flow: it starts bone dry, the stream is revealed as its front DESCENDS from the inlet, and pools
+rise. When the rising outside water actually reaches the chamber's door, it SPILLS THROUGH into the
+chamber — drained from the outside pool (conserved) at a head-driven rate, a visible waterfall down
+the chamber wall — so the chamber fills because the maze's own water got there, ONE coupled flow,
+not a private tap. The outside then holds at the door sill, spilling its inflow in, until the chamber
+brims. The timeline is played back against inspection progress (eased, rate-capped) so the chamber
+tops off just as inspection completes — no added latency, no dead air.
 
 Pooling itself is a fast level-flood (so surfaces are instantly flat, no slow relaxation): for a
 surface height L, a breadth-first flood from the inlet lets water FALL for free (the visible
 streams) and POOL only through submerged cells (floor below L), finding one common level (U-tube),
-overflowing the lowest lip to cascade on. Constant inflow -> constant flow rate; volume conserved by
-construction.
+overflowing the lowest lip to cascade on. The outside is one such reservoir (volume<->level via the
+flood profile); the chamber is a second, joined by the door as a finite orifice — a head-driven flux
+between them, conserved. Constant inflow -> constant flow rate; volume conserved by construction.
 
 Ships as a configsys splash provider (see configsys/splashes.py for the ABI): the HOST
 (configsys.tui.splash.run_splash) owns the frame loop and calls render(frame); MazeSim is the
@@ -68,9 +71,10 @@ MAX_FRAMES = 260                    # the timeline is sampled to at most this ma
 # surfaces); the forward loop just advances the volume and the reveal front, and rate-limits the
 # chamber. Constant inflow -> constant flow rate; volume is conserved by construction.
 INJECT = 2.0                        # volume poured in each step (the flow rate)
-DESCENT_STEPS = 14                  # steps for the stream's reveal front to reach the far end
-CHAM_SHARE = 0.55                   # fraction of inflow diverted into the chamber once its door opens
-MAX_STEPS = 1500                    # safety cap on the forward sim
+DESCENT_FRACTION = 0.12             # reveal the stream's front over roughly the first 12% of the pour
+DOOR_C = 10.0                       # door conductance: chamber intake per unit of head over its sill
+                                    # (high -> the outside holds at the sill and spills its inflow in)
+MAX_STEPS = 40000                   # safety cap (the volume timeline is cheap, so this is generous)
 SETTLE_TAIL = 6                     # hold the brimming end a moment so it reads still
 
 
@@ -196,12 +200,22 @@ class MazeSim:
         # the chamber then backfills gradually) rather than a ceiling door that pours it full at once.
         if cc0 - 1 >= 0:
             self._carve(cr0, cc0, cr0, cc0 - 1)            # door on the left of the top row
+            self._door = (cr0, cc0, 'left')
         else:
             self._carve(cr0, cc0 + cw - 1, cr0, cc0 + cw)  # ...or the right, at a screen edge
+            self._door = (cr0, cc0 + cw - 1, 'right')
 
-        # the top inlet: open the ceiling above a random top-row maze cell up to the screen top
+        # the top inlet: open the ceiling above a top-row maze cell, biased to the FAR side from the
+        # chamber so water has to flood and traverse the maze before it reaches the door (a fuller,
+        # more consistent pour) rather than dropping straight onto the door mouth.
         inlet_cols = [c for c in range(self.mc) if (0, c) not in chamber]
-        ic = inlet_cols[rng.randrange(len(inlet_cols))]
+        cham_center = cc0 + cw / 2.0
+        if cham_center < self.mc / 2.0:                        # chamber on the left -> inlet right
+            far = [c for c in inlet_cols if c > self.mc * 0.55]
+        else:                                                 # chamber on the right -> inlet left
+            far = [c for c in inlet_cols if c < self.mc * 0.45]
+        pool = far or inlet_cols
+        ic = pool[rng.randrange(len(pool))]
         y, x = self._cell_origin(0, ic)
         for yy in range(0, y):
             for xx in range(x, x + CELL_W):
@@ -223,6 +237,21 @@ class MazeSim:
         self.chamber_top_e = max(self.H - 1 - y for (y, x) in self.chamber_cells)
         self.chamber_floor_e = min(self.H - 1 - y for (y, x) in self.chamber_cells)
         self._open_set = set(self.open_cells)
+        # the door's char column + top row inside the chamber, for drawing the pour-through waterfall
+        dr, dc, side = self._door
+        oy, ox = self._cell_origin(dr, dc)
+        self.door_y = oy
+        self.door_x = ox if side == 'left' else ox + CELL_W - 1
+        self.door_sill = self.chamber_top_e - 0.5    # provisional; _simulate resets it to L_door
+        # the OUTSIDE cells at the chamber's walls — water reaching one of these (submerged) is what
+        # actually opens the door, so timing tracks where the flood really is, not a global level.
+        mouth = set()
+        for (y, x) in self.chamber_cells:
+            for ny, nx in ((y, x - 1), (y, x + 1), (y - 1, x), (y + 1, x)):
+                if (0 <= ny < self.H and 0 <= nx < self.W and self.open[ny][nx]
+                        and (ny, nx) not in self.chamber_set):
+                    mouth.add((ny, nx))
+        self.door_mouth = mouth
 
     # -- the forward-time pour --------------------------------------------
 
@@ -328,6 +357,14 @@ class MazeSim:
             for (y, x) in self.chamber_cells:
                 d = cl - (H - 1 - y)
                 grid[y][x] = 8 if d >= 0.92 else (max(1, min(7, int(d * 8 + 0.5))) if d > 0 else 0)
+        if v_cham < len(self.chamber_cells) and L >= self.door_sill:   # water pouring THROUGH the door
+            x = self.door_x
+            for y in range(self.door_y, self.chamber_box[1] + 1):
+                if (y, x) not in block:
+                    break
+                if grid[y][x] != 0:
+                    break                                    # reached the chamber's water surface
+                grid[y][x] = 4                               # a falling stream down the chamber wall
         return grid
 
     def _simulate(self):
@@ -338,37 +375,50 @@ class MazeSim:
         so the chamber fills visibly WITH the ongoing flow, not in a frozen phase. One frame per
         step (the timeline IS the flow); ends when the chamber brims.'''
         block = self.chamber_set
-        door_e = self.chamber_top_e
         arrival = self._arrival(block)
         far = max((arrival[y][x] for (y, x) in self.open_cells if arrival[y][x] < 10 ** 9), default=1)
-        front_speed = max(1.0, far / DESCENT_STEPS)          # reveal the stream over ~DESCENT_STEPS
+        # profile outside volume vs surface level AND find the level at which the flood first reaches
+        # the chamber's door mouth submerged — the moment water genuinely arrives at the door.
         profile = []                                         # (L, outside volume) up the whole maze
+        door_sill = vol_door = None
         L = 0.0
         while L <= self.H + 1:
-            profile.append((L, self._volume(L, self._flood(L, block))))
+            reach = self._flood(L, block)
+            vol = self._volume(L, reach)
+            profile.append((L, vol))
+            if door_sill is None and any(reach[y][x] and (self.H - 1 - y) < L for (y, x) in self.door_mouth):
+                door_sill, vol_door = L, vol                 # water has reached the door here
             L += 0.34
+        if door_sill is None:                                # mouth never wetted (shouldn't happen)
+            door_sill, vol_door = profile[-1]
+        self.door_sill = door_sill                           # so _build draws the pour at the right time
         cham_cap = float(len(self.chamber_cells))
-        inject = max(INJECT, len(self.open_cells) / 400.0)   # scale flow with size: ~constant #steps
+        # 1) the cheap part: step the (outside, chamber) VOLUME timeline forward — scalar updates
+        # only, no flood — so it can run at a fine step for a smooth pour.
+        timeline = [(0.0, 0.0)]
         v_out = v_cham = 0.0
-        frames = [self._build(0.0, arrival, 0.0, 0.0, block)]   # frame 0: bone dry, t=0
-        t = 1
-        while t <= MAX_STEPS:
-            Lc = self._invert(profile, v_out)
-            door_open = Lc >= door_e - 0.5
-            if door_open and v_cham < cham_cap:
-                dC = min(inject * CHAM_SHARE, cham_cap - v_cham)
-                v_cham += dC
-                v_out += inject - dC
-            else:
-                v_out += inject
-            frames.append(self._build(self._invert(profile, v_out), arrival, t * front_speed, v_cham, block))
-            if door_open and v_cham >= cham_cap - 1e-6:
+        while len(timeline) <= MAX_STEPS:
+            v_out += INJECT                                  # the source pours into the maze
+            head = self._invert(profile, v_out) - door_sill  # depth of outside water over the door
+            if head > 0 and v_cham < cham_cap:
+                # water spills THROUGH the door into the chamber, DRAINED from the outside pool
+                # (conserved) at a head-driven rate — a finite opening, not a private tap. Capped so
+                # it can't pull the outside below the sill: the excess just keeps pouring in.
+                flux = min(DOOR_C * head, cham_cap - v_cham, max(0.0, v_out - vol_door))
+                v_out -= flux
+                v_cham += flux
+            timeline.append((v_out, v_cham))
+            if v_cham >= cham_cap - 1e-6:
                 break
-            t += 1
-        for _ in range(SETTLE_TAIL):                         # hold the brimming end a moment
-            frames.append(frames[-1])
-        if len(frames) > MAX_FRAMES:
-            frames = [frames[round(i * (len(frames) - 1) / (MAX_FRAMES - 1))] for i in range(MAX_FRAMES)]
+        # 2) the only real cost is the per-frame flood, so render at most MAX_FRAMES of the timeline
+        # (evenly sampled) — bounds precompute regardless of how many steps the pour took.
+        n = len(timeline)
+        front_speed = far / max(1.0, (n - 1) * DESCENT_FRACTION)   # descent over ~DESCENT_FRACTION of the run
+        idxs = range(n) if n <= MAX_FRAMES else (round(i * (n - 1) / (MAX_FRAMES - 1))
+                                                 for i in range(MAX_FRAMES))
+        frames = [self._build(self._invert(profile, timeline[i][0]), arrival, i * front_speed,
+                              timeline[i][1], block) for i in idxs]
+        frames += [frames[-1]] * SETTLE_TAIL                 # hold the brimming end a moment
         return frames
 
     # -- runtime ----------------------------------------------------------

@@ -27,16 +27,20 @@ The simulation is **done when the chamber is full**.
 
 The pour is stepped **forward in time** — `MazeSim` precomputes one frame per step, so the timeline
 *is* the flow: it starts bone dry, the stream is revealed as its front **descends** from the inlet,
-pools rise, and once the surface reaches the chamber door part of the constant inflow is **diverted
-into the chamber** (rate-limited, so it fills gradually floor→ceiling) while the outside keeps rising
-on the rest — so the chamber fills *with* the ongoing flow, not in a frozen phase. That precomputed
-timeline is then played back against configsys's inspection **progress** — eased and rate-capped —
-so the chamber tops off just as inspection completes: no added latency, no dead air.
+and pools rise. When the outside water actually reaches the chamber's door it **spills through**
+into the chamber — drained from the outside pool (conserved) at a **head-driven rate**, a visible
+waterfall down the chamber wall — so the chamber fills *because the maze's own water got there*, one
+coupled flow, not a private tap. The outside then holds at the sill, spilling its inflow in, until
+the chamber brims. That timeline is played back against configsys's inspection **progress** — eased
+and rate-capped — so the chamber tops off just as inspection completes.
 
 Pooling is a fast *level-flood* (surfaces are instantly flat, no slow relaxation): for a surface
 height `L`, a breadth-first flood from the inlet lets water fall and cascade freely and pool only
-through submerged cells, so it finds one common level (U-tube) and overflows the lowest lip.
-Constant inflow → constant flow rate; volume is conserved by construction.
+through submerged cells, finding one common level (U-tube) and overflowing the lowest lip. The
+outside is one reservoir (volume↔level via the flood profile); the chamber is a second, joined by
+the door as a **finite orifice** — a head-driven flux between them. The door conductance (`DOOR_C`)
+and flow rate (`INJECT`) are the tuning knobs. Constant inflow → constant flow rate; volume
+conserved by construction.
 
 ## Install
 
