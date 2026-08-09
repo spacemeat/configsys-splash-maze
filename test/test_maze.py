@@ -62,13 +62,29 @@ def test_path_length_is_in_the_target_band():
         assert maze.PATH_LO - 0.12 <= frac <= maze.PATH_HI + 0.12   # tuned length, with slack
 
 
-def test_pools_sit_off_the_route():
-    '''Pools are in nooks the centipede never crawls — not on the route.'''
+def test_chambers_sit_off_the_route():
+    '''The open chambers are nooks the centipede never crawls through — off the route.'''
     sim = _sim(seed=3)
     route = set(sim.route)
-    for p in sim.pools:
-        for x in range(p['x0'], p['x1'] + 1):
-            assert (p['y'], x) not in route
+    for ch in sim.chambers:
+        for y in range(ch['y0'], ch['y1'] + 1):
+            for x in range(ch['x0'], ch['x1'] + 1):
+                assert (y, x) not in route
+
+
+def test_fish_only_in_wide_enough_basins():
+    '''Fish appear only where water can pool (a basin) AND the basin is 3-6 blocks wide.'''
+    saw_fish = saw_dry = False
+    for seed in range(8):
+        sim = _sim(seed=seed)
+        for ch in sim.chambers:
+            if ch['fish']:
+                assert ch['basin'] and ch['depth'] >= 1
+                assert maze.FISH_MIN_W <= ch['width'] <= maze.FISH_MAX_W
+                saw_fish = True
+            if not ch['basin']:
+                saw_dry = True
+    assert saw_fish and saw_dry                            # both basins-with-fish and dry chambers occur
 
 
 def test_determinism_by_seed():

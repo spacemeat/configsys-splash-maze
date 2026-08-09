@@ -46,9 +46,11 @@ FPS = 30.0
 MIN_DURATION = 2.8
 PLAY_EASE = 3.2                    # the crawl eases toward progress at this rate (per second)
 BODY_MIN, BODY_MAX = 8, 16         # centipede body length (segments), scaled to the maze
-ENDING_FRAC = 0.10                 # last fraction of the run: she's home, the happy ending plays
-PATH_LO, PATH_HI = 0.34, 0.62      # target path length as a fraction of the rooms
+ENDING_FRAC = 0.13                 # last fraction of the run: she's home on the floor, hearts play
+PATH_LO, PATH_HI = 0.17, 0.31      # target path length (fraction of rooms) — halved so she crawls
+                                   # slower: each block spans ~2 components now, not one
 GEN_TRIES = 60                     # path attempts; keep the best-length winding route
+FISH_MIN_W, FISH_MAX_W = 3, 6      # only basins this many blocks wide get fish
 
 
 def _hsv(h, s, v):
@@ -116,36 +118,39 @@ class MazeSim:
         self.wall = [[True] * self.W for _ in range(self.H)]
         self.graph = {}
         rng = self.rng
-        # chamber: a block of rooms low and central — the destination
-        cw = min(self.gw - 2, max(2, self.gw // 3))
-        ch = max(2, self.gh // 4)
+        # the EGG chamber: a roomy block low and central — the destination she walks down into
+        cw = min(self.gw - 2, max(4, self.gw // 4))
+        ch = max(3, self.gh // 4)
         cc0 = (self.gw - cw) // 2
         cr0 = self.gh - ch
         self.chamber_rooms = {(r, c) for r in range(cr0, cr0 + ch) for c in range(cc0, cc0 + cw)}
         entrance = (cr0, cc0 + cw // 2)            # the room the path arrives at (top-centre of chamber)
 
-        # 1) THE PATH FIRST: a winding self-avoiding route from a top edge to the chamber entrance,
-        # kept out of the chamber until it's wandered enough, tuned to a good length.
+        # 1) plan the bigger open CHAMBERS up front (rooms reserved, each with ONE chosen opening —
+        # high => a water-holding basin, low => it just drains), so the path + maze go around them.
+        self._plan_chambers()
+        avoid = self.chamber_rooms | self.decor_rooms
+
+        # 2) THE PATH: a winding self-avoiding route from a top edge to the chamber entrance, kept out
+        # of the chambers until it's wandered enough, tuned to a good (now shorter, slower) length.
         rooms = self.gw * self.gh
         lo, hi = int(rooms * PATH_LO), int(rooms * PATH_HI)
-        starts = [(0, c) for c in range(self.gw) if (0, c) not in self.chamber_rooms]
+        starts = [(0, c) for c in range(self.gw) if (0, c) not in avoid]
         best = None
         for _ in range(GEN_TRIES):
             start = starts[rng.randrange(len(starts))]
-            p = self._walk(start, entrance, lo)
+            p = self._walk(start, entrance, lo, avoid)
             if p and (best is None or _closer(len(p), lo, hi, len(best))):
                 best = p
                 if lo <= len(p) <= hi:
                     break
-        self.path_rooms = best or self._walk(starts[0], entrance, 0) or [entrance]
-
-        # carve the path
+        self.path_rooms = best or self._walk(starts[0], entrance, 0, avoid) or [entrance]
         for a, b in zip(self.path_rooms, self.path_rooms[1:]):
             self._carve(a, b)
 
-        # 2) THE MAZE AROUND IT: grow a spanning tree into every other room, hanging off the path —
-        # so the route is indistinguishable from the offshoots and dead ends.
-        visited = set(self.path_rooms) | self.chamber_rooms
+        # 3) THE MAZE AROUND IT: a spanning tree into every other room (not the reserved chambers),
+        # hanging off the path — so the route is indistinguishable from the offshoots and dead ends.
+        visited = set(self.path_rooms) | avoid
         stack = [rng.choice(self.path_rooms)]
         while stack:
             cur = stack[-1]
@@ -158,32 +163,41 @@ class MazeSim:
             else:
                 stack.pop()
             if not stack:                          # unvisited rooms left? attach one to the tree + restart
+                # anchor to a visited MAZE room (not a reserved chamber — those aren't in the tree
+                # yet), or the region hangs off a chamber as its own disconnected component.
                 rem = [(r, c) for r in range(self.gh) for c in range(self.gw)
-                       if (r, c) not in visited and any(n in visited for n in self._room_neighbors(r, c))]
+                       if (r, c) not in visited
+                       and any(n in visited and n not in avoid for n in self._room_neighbors(r, c))]
                 if rem:
                     room = rem[rng.randrange(len(rem))]
-                    anchor = next(n for n in self._room_neighbors(*room) if n in visited)
-                    self._carve(room, anchor)      # connect it to the tree so we make progress
+                    anchor = next(n for n in self._room_neighbors(*room) if n in visited and n not in avoid)
+                    self._carve(room, anchor)
                     visited.add(room)
                     stack = [room]
 
-        # open the chamber into one clean room (all cells in its box, pillars and all)
-        for cr in range(2 * cr0 + 1, 2 * (cr0 + ch - 1) + 2):
-            for cc in range(2 * cc0 + 1, 2 * (cc0 + cw - 1) + 2):
-                self._open_cell(cr, cc)
-
-        # 3) the crawl route in CELLS: rooms + the passages between them, then on into the chamber to
-        # the eggs, then trace it to a smooth per-char centreline.
-        self._build_route(entrance, cr0, cc0, cw, ch)
-        # 4) eggs, and a few fish pools in dead-end nooks the centipede never enters
-        self._place_eggs(cr0, cc0, cw, ch)
-        self._place_pools()
-
+        # open the egg chamber into one clean room, and each decorative chamber + its single opening
+        self._open_block(cr0, cc0, ch, cw)
+        for cd in self.chambers:
+            r, c, bh, bw = cd['r'], cd['c'], cd['bh'], cd['bw']
+            self._open_block(r, c, bh, bw)
+            self._carve(cd['edge'], cd['adj'])     # the one opening (top = basin, bottom = drains)
         self.open = [[not self.wall[y][x] for x in range(self.W)] for y in range(self.H)]
 
-    def _walk(self, start, goal, want_min):
+        # 4) the crawl route (down into the egg chamber to the floor), the eggs, and which chambers
+        # are water-holding basins wide enough for fish.
+        self._build_route(entrance, cr0, cc0, cw, ch)
+        self._place_eggs(cr0, cc0, cw, ch)
+        self._compute_basins()
+
+    def _open_block(self, r, c, bh, bw):
+        for cr in range(2 * r + 1, 2 * (r + bh - 1) + 2):
+            for cc in range(2 * c + 1, 2 * (c + bw - 1) + 2):
+                self._open_cell(cr, cc)
+
+    def _walk(self, start, goal, want_min, avoid):
         '''A random self-avoiding DFS from start to goal (its stack IS the path). It won't step onto
-        the goal until it has wandered `want_min` rooms, which biases a long, twisty route.'''
+        the goal until it has wandered `want_min` rooms, which biases a long, twisty route; it steers
+        clear of the reserved chamber rooms in `avoid`.'''
         rng = self.rng
         stack = [start]
         seen = {start}
@@ -197,7 +211,7 @@ class MazeSim:
             if cur == goal:
                 return list(stack)
             nb = [n for n in self._room_neighbors(*cur)
-                  if n not in seen and n not in self.chamber_rooms]
+                  if n not in seen and n not in avoid]
             if goal in self._room_neighbors(*cur) and len(stack) >= want_min:
                 nb.append(goal)
             if not nb:
@@ -260,18 +274,68 @@ class MazeSim:
                 self.eggs.append((floor, x))
         self.chamber_box = (y0, y1, x0, x1)
 
-    def _place_pools(self):
-        '''Standing pools with a fish, in leaf rooms (dead ends) off the route.'''
-        route_rooms = set(self.path_rooms)
-        leaves = [rm for rm, adj in self.graph.items()
-                  if len(adj) == 1 and rm not in route_rooms and rm not in self.chamber_rooms]
-        self.rng.shuffle(leaves)
-        self.pools = []
-        for rm in leaves[:max(1, (self.gw * self.gh) // 22)]:
-            cr, cc = self._room_cell(*rm)
-            y, x0 = self._cell_chars(cr, cc)
-            self.pools.append({'y': y, 'x0': x0, 'x1': min(x0 + CW - 1, self.W - 1),
-                               'lvl': self.rng.randint(4, 8), 'phase': self.rng.uniform(0, 6.28)})
+    def _plan_chambers(self):
+        '''Reserve several bigger open room-blocks off the egg chamber, kept apart by a 1-room margin,
+        each with exactly ONE opening chosen up front: mostly a HIGH opening (so it holds water — a
+        basin) but sometimes a LOW one (so it just drains, dry). Actual carving happens in _generate;
+        which basins get fish is decided by width in _compute_basins.'''
+        rng = self.rng
+        taken = set(self.chamber_rooms) | {n for rm in self.chamber_rooms
+                                           for n in self._room_neighbors(*rm)}
+        self.chambers = []
+        self.decor_rooms = set()
+        want = max(2, (self.gw * self.gh) // 16)
+        for _ in range(300):
+            if len(self.chambers) >= want:
+                break
+            bw = rng.randint(2, 4)
+            bh = rng.randint(2, 3)
+            if bw >= self.gw or bh >= self.gh:
+                continue
+            r = rng.randint(1, self.gh - bh - 1)                 # leave room for a top/bottom opening
+            c = rng.randint(0, self.gw - bw)
+            block = {(rr, cc) for rr in range(r, r + bh) for cc in range(c, c + bw)}
+            margin = block | {n for rm in block for n in self._room_neighbors(*rm)}
+            if margin & taken:
+                continue
+            mid = c + bw // 2
+            top, bot = (r - 1, mid), (r + bh, mid)               # rooms just above / below the block
+            if rng.random() < 0.68 and top not in self.chamber_rooms:
+                edge, adj = (r, mid), top                        # high opening -> basin
+            elif r + bh < self.gh and bot not in self.chamber_rooms:
+                edge, adj = (r + bh - 1, mid), bot               # low opening -> drains
+            elif top not in self.chamber_rooms:
+                edge, adj = (r, mid), top
+            else:
+                continue
+            taken |= margin
+            self.decor_rooms |= block
+            self.chambers.append({'r': r, 'c': c, 'bh': bh, 'bw': bw, 'edge': edge, 'adj': adj,
+                                  'y0': 2 * r + 1, 'y1': 2 * (r + bh - 1) + 1,
+                                  'x0': (2 * c + 1) * CW, 'x1': (2 * (c + bw - 1) + 1) * CW + CW - 1})
+
+    def _compute_basins(self):
+        '''For each chamber decide if it's a BASIN — water poured in would pool — by finding its
+        lowest opening (where water would drain). Water sits from the floor up to just below that
+        rim; a chamber that's wide enough (FISH_MIN_W..FISH_MAX_W blocks) and holds real depth gets
+        fish. A chamber whose lowest opening is at its floor just drains (dry).'''
+        for ch in self.chambers:
+            y0, y1, x0, x1 = ch['y0'], ch['y1'], ch['x0'], ch['x1']
+            lowest_opening = y0 - 1                           # nothing found yet
+            for y in range(y0, y1 + 1):
+                for x in range(x0, x1 + 1):
+                    if not self.open[y][x]:
+                        continue
+                    for ny, nx in ((y - 1, x), (y + 1, x), (y, x - 1), (y, x + 1)):
+                        outside = not (y0 <= ny <= y1 and x0 <= nx <= x1)
+                        if outside and 0 <= ny < self.H and 0 <= nx < self.W and self.open[ny][nx]:
+                            lowest_opening = max(lowest_opening, y)
+            ch['width'] = (x1 - x0 + 1) // CW
+            ch['surface'] = lowest_opening + 1                # water top; below the rim
+            ch['depth'] = y1 - lowest_opening
+            ch['basin'] = ch['depth'] >= 1
+            ch['fish'] = ch['basin'] and FISH_MIN_W <= ch['width'] <= FISH_MAX_W
+            ch['phase'] = self.rng.uniform(0, 6.28)
 
     # -- runtime ----------------------------------------------------------
 
@@ -357,23 +421,34 @@ class MazeSplash(Splash):
             for x in range(sim.W):
                 if wg[x] is not None:
                     self._add(y, x, wg[x][0], wg[x][1])
-        self._draw_pools(frame)
+        self._draw_basins(frame)
         self._draw_eggs(frame)
         self._draw_centipede(frame)
         if frame.label:
             self._draw_label(frame)
         return sim.filled
 
-    def _draw_pools(self, frame):
-        for p in self.sim.pools:
-            y, x0, x1, lvl = p['y'], p['x0'], p['x1'], p['lvl']
-            for x in range(x0, x1 + 1):
-                self._add(y, x, EIGHTHS[lvl] if lvl < 8 else '█', self._water)
-            # a little fish paddling back and forth on the pool surface
-            t = frame.elapsed * 1.3 + p['phase']
-            right = math.cos(t) >= 0
-            fx = x0 if math.sin(t) < 0 else x1
-            self._add(y, fx, ('◄' if not right else '►'), self._fishc)
+    def _draw_basins(self, frame):
+        '''Standing water in the chambers that are basins; fish only in the wide-enough ones.'''
+        sim = self.sim
+        for ch in sim.chambers:
+            if not ch['basin']:
+                continue
+            surf, y1 = ch['surface'], ch['y1']
+            for y in range(surf, y1 + 1):
+                for x in range(ch['x0'], ch['x1'] + 1):
+                    if sim.open[y][x]:
+                        self._add(y, x, '█' if y > surf else '▆', self._water)
+            if not ch['fish']:
+                continue
+            span = max(1, ch['x1'] - ch['x0'] - 1)
+            depth = max(1, y1 - surf + 1)
+            for k in range(max(1, ch['width'] // 2)):        # a fish or three, by width
+                t = frame.elapsed * 1.1 + ch['phase'] + k * 2.1
+                fx = int(ch['x0'] + 1 + (0.5 + 0.5 * math.sin(t)) * (span - 1))
+                fy = surf + (k % depth)
+                if 0 <= fy < sim.H and 0 <= fx < sim.W and sim.open[fy][fx]:
+                    self._add(fy, fx, '►' if math.cos(t) >= 0 else '◄', self._fishc)
 
     def _draw_eggs(self, frame):
         sim = self.sim
