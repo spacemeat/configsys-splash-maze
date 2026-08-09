@@ -1,0 +1,19 @@
+{
+    // configsys-splash-maze — the "maze" startup splash as a code plugin: a 2-D brick maze floods
+    // from a top inlet under hydrostatic physics (streams cascade over ledges, pools find a common
+    // level and climb — U-tube). A sealed lower chamber holds a fish flopping on dry stone; once the
+    // rising water reaches the chamber's side door it backfills and the fish swims. The whole pour is
+    // solved up front and played back against inspection progress, so the chamber fills just as
+    // inspection completes. Rides the same splash provider ABI as the built-in default (see
+    // configsys/splashes.py).
+    name: configsys-splash-maze
+
+    // The plugin ABI this code targets; configsys loads it only if this is in ABI_SUPPORTED.
+    requires-abi: 1
+
+    // Informational: the splash provider this brings (selectable as `splash: maze`).
+    provides: { splashes: [ maze ] }
+
+    // The Splash provider module. It runs code, so it needs `plugin trust <name>` before it loads.
+    code: maze.py
+}
