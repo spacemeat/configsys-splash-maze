@@ -1,16 +1,18 @@
 '''maze.py — the "maze" startup splash for configsys, as a code plugin.
 
 A centipede crawls through a brick maze toward a chamber of quivering eggs. The trick that makes it
-fit a startup's timing perfectly: we know the step budget up front, so we build the PATH first — a
-winding, twisting route from an edge to the chamber, adjusted to a good length — and only THEN grow
-the maze (walls, offshoots, dead ends) AROUND that path, so the centipede just looks like it's
-solving a maze. Her head position is simply progress mapped along the path (each cell ~ one component
-checked); a little tail of the run is reserved for the happy ending as she reaches her eggs. Off the
-path, in maze nooks she never visits, sit little standing pools with fish.
+fit a startup's timing: the build is DEFERRED to the first render, when the component count is known,
+and the PATH is built first — sized to that count (she wanders ~components/COMPONENTS_PER_WANDER_ROOM
+rooms, then beelines to the nest) — and only THEN the maze (walls, offshoots, dead ends) is grown
+AROUND that path, so she just looks like she's solving it. Her head is progress mapped along the
+path; the route's tail serpentines the egg chamber so her WHOLE body coils onto the floor, and a
+little of the run is reserved for the happy ending. Off the path, in wide water-holding basins, swim
+ocean-style fish.
 
-There's no physics and no precompute to speak of — generation is a couple of cheap graph walks; the
-animation is procedural from `progress` (the crawl) and elapsed time (legs, quiver, fish). So it's
-instant to build and always lands on time.
+Coupling the path to the load means she paces to the real work: a bigger load = a windier, longer
+trip at the same crawl speed. There's no physics and no heavy precompute — generation is a couple of
+cheap graph walks; the animation is procedural from `progress` (the crawl) and elapsed time (legs,
+quiver, fish).
 
 Ships as a configsys splash provider (see configsys/splashes.py for the ABI): the HOST
 (configsys.tui.splash.run_splash) owns the frame loop and calls render(frame); MazeSim is the
@@ -60,9 +62,16 @@ ENDING_FRAC = 0.12                 # last fraction of the run: she's coiled on t
 # fraction of the rooms, floored and CAPPED so she doesn't blur through a huge terminal — tuned for
 # ~half the earlier pace (roughly a block per two components). The route then SERPENTINES the egg
 # chamber, so its last body-length lies inside the chamber and her whole body coils onto the floor.
-PATH_FRAC, PATH_MIN, PATH_CAP = 0.05, 6, 10   # how far she WANDERS before beelining to the nest;
-                                              # the trip down to the bottom chamber adds to this, so
-                                              # a taller maze is naturally a bit longer (size-dependent)
+# Her WANDER length — the rooms she loops through before beelining to the nest — scales with the
+# number of components to load (known once inspection starts; the splash defers its build until then).
+# So she paces to the real work: a bigger load = a windier, longer trip at the SAME crawl speed.
+#   wander ≈ components / COMPONENTS_PER_WANDER_ROOM   (floored, and capped to a fraction of the maze)
+# Lower COMPONENTS_PER_WANDER_ROOM ⇒ a WINDIER, slightly faster crawl (more looping per component).
+COMPONENTS_PER_WANDER_ROOM = 3.0
+WANDER_MIN, WANDER_MAX_FRAC = 6, 0.5
+BEELINE_CHOICES = 1                            # after wandering, approach the nest directly (1); the
+                                               # WANDER carries the windiness. Raise for a meandering
+                                               # (windier but longer, less predictable) approach.
 GEN_TRIES = 60                     # path attempts; keep the best-length winding route
 FISH_MIN_W, FISH_MAX_W = 3, 6      # only basins this many blocks wide get fish
 
@@ -82,10 +91,11 @@ class MazeSim:
     the eggs and a few fish pools, and exposes the crawl as a function of progress. Deterministic
     given `rng`.'''
 
-    def __init__(self, w, h, rng):
+    def __init__(self, w, h, rng, wander=None):
         self.W = max(20, int(w))
         self.H = max(12, int(h))
         self.rng = rng
+        self._wander = wander                  # rooms to loop before beelining (None => a default)
         self._dims()
         self._generate()
         self._p = 0.0
@@ -148,7 +158,8 @@ class MazeSim:
         # 2) THE PATH: a winding self-avoiding route from a top edge to the chamber entrance, kept out
         # of the chambers until it's wandered enough, tuned to a good (now shorter, slower) length.
         rooms = self.gw * self.gh
-        target = max(PATH_MIN, min(PATH_CAP, int(rooms * PATH_FRAC)))
+        wander = self._wander if self._wander is not None else max(WANDER_MIN, rooms // 12)
+        target = max(WANDER_MIN, min(int(rooms * WANDER_MAX_FRAC), wander))
         starts = [(0, c) for c in range(self.gw) if (0, c) not in avoid]
         self.path_rooms = None
         for _ in range(GEN_TRIES):                             # wander ~target rooms, then beeline in
@@ -232,9 +243,10 @@ class MazeSim:
             if not nb:
                 stack.pop()
                 continue
-            if len(stack) >= want_min:                          # wandered enough -> beeline to the
-                nxt = min(nb, key=lambda n: abs(n[0] - goal[0]) + abs(n[1] - goal[1]))   # nest, so
-            else:                                               # the route length stays near target
+            if len(stack) >= want_min:                          # wandered enough -> head for the
+                nb.sort(key=lambda n: abs(n[0] - goal[0]) + abs(n[1] - goal[1]))         # nest, but
+                nxt = nb[rng.randrange(min(BEELINE_CHOICES, len(nb)))]                   # meander a bit
+            else:
                 nxt = nb[rng.randrange(len(nb))]
             stack.append(nxt)
             seen.add(nxt)
@@ -412,8 +424,20 @@ class MazeSplash(Splash):
 
     def __init__(self, scr, pal, size, seed=None):
         super().__init__(scr, pal, size, seed)
-        self.sim = MazeSim(self.w, self.h, self.rng)
-        rng = self.rng
+        # DEFER the build: the maze/path is sized to the component count, which we only learn from
+        # frame.counts at render time — so build lazily on the first render (see _build).
+        self.sim = None
+
+    def _build(self, total):
+        pal, rng = self.pal, self.rng
+        # size the wander to the load, then build the maze around a path of that length
+        gw = max(3, (self.w // CW - 1) // 2)
+        gh = max(3, (self.h - 1) // 2)
+        wander = None
+        if total and total > 0:
+            wander = max(WANDER_MIN, min(int(gw * gh * WANDER_MAX_FRAC),
+                                         round(total / COMPONENTS_PER_WANDER_ROOM)))
+        self.sim = MazeSim(self.w, self.h, rng, wander=wander)
         self._brick = pal.rgb_pair((150, 54, 40), (108, 104, 98))
         self._brick_grey = pal.rgb_pair((120, 120, 126), (96, 96, 100))
         hue = rng.random()
@@ -440,6 +464,8 @@ class MazeSplash(Splash):
                     self._wg[y][x] = (glyph, self._brick_grey if grey else self._brick)
 
     def render(self, frame):
+        if self.sim is None:                                 # first frame: now we know the load size
+            self._build(frame.counts[1] if frame.counts else 0)
         self.sim.set_progress(frame.progress)
         self.sim.step(frame.dt)
         sim, scr = self.sim, self.scr

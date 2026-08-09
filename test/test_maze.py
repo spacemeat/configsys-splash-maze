@@ -55,14 +55,51 @@ def test_route_is_contiguous():
         assert abs(y0 - y1) + abs(x0 - x1) == 1
 
 
-def test_path_is_a_modest_fraction_not_maze_filling():
-    '''She wanders a bit then beelines to the nest — a modest route, not a maze-filling tour (so the
-    crawl stays slow), even on a big maze.'''
+def test_default_path_is_not_maze_filling():
+    '''With the default (fallback) wander she takes a windy-but-modest route, not a whole-maze tour.'''
     for seed in range(6):
         sim = _sim(seed=seed)
-        assert 2 <= len(sim.path_rooms) < 0.35 * sim.gw * sim.gh
+        assert 2 <= len(sim.path_rooms) < 0.6 * sim.gw * sim.gh
     big = maze.MazeSim(200, 50, random.Random(0))
-    assert len(big.path_rooms) < 0.2 * big.gw * big.gh
+    assert len(big.path_rooms) < 0.3 * big.gw * big.gh
+
+
+def test_larger_wander_gives_a_longer_windier_path():
+    short = maze.MazeSim(80, 26, random.Random(1), wander=8)
+    long = maze.MazeSim(80, 26, random.Random(1), wander=60)
+    assert len(long.path_rooms) > len(short.path_rooms)
+
+
+def _mock_splash(w, h, seed=1):
+    class Scr:
+        def erase(self):
+            pass
+        def addstr(self, *a):
+            pass
+    class Pal:
+        def rgb_attr(self, c):
+            return 0
+        def rgb_pair(self, f, b):
+            return 0
+        def get(self, r):
+            return 0
+    return maze.MazeSplash(Scr(), Pal(), (h, w), seed=seed)
+
+
+def test_build_is_deferred_and_scales_with_component_count():
+    '''The maze isn't built until the first render (when the component count is known), and a bigger
+    load yields a longer, windier path.'''
+    import configsys.splashes as sp_mod
+    sp = _mock_splash(72, 26)
+    assert sp.sim is None                                    # nothing built at construction
+
+    def path_for(total):
+        s = _mock_splash(72, 26)
+        s.render(sp_mod.SplashFrame(progress=0.0, counts=(0, total), label='x',
+                                    dt=1 / 30, elapsed=0.0, done=False))
+        return len(s.sim.path_rooms)
+
+    assert path_for(300) > path_for(60)                     # more components -> windier trip
 
 
 def test_whole_body_ends_inside_the_chamber():

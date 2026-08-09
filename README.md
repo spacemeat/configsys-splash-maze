@@ -13,20 +13,24 @@ and a few hearts drift up.
 
 ## How it fits a startup's timing (the trick)
 
-We know the step budget up front, so instead of fighting a simulation to land on time, we **build
-the path first**:
+The build is **deferred to the first render**, when the component count is known, and the path is
+built to match it:
 
-1. **Path first** — a winding, self-avoiding route from a top edge down to the chamber, kept out of
-   the chamber until it has wandered enough, and length-tuned (a good fraction of the maze).
-2. **Maze around it** — a spanning tree is then grown into every *other* room, hanging off the
-   path, so the route is indistinguishable from the offshoots and dead ends. She just looks like
-   she's solving a maze.
-3. **The crawl is pure playback** — her head position is `progress` mapped along the route (each
-   cell ≈ one component checked); the last sliver of the run is reserved for the happy ending. Legs,
-   body ripple, egg quiver and fish are procedural from elapsed time.
+1. **Path first, sized to the load** — she wanders `components / COMPONENTS_PER_WANDER_ROOM` rooms
+   (a winding, self-avoiding walk), then beelines to the chamber. So a bigger load ⇒ a windier,
+   longer trip *at the same crawl speed*.
+2. **Maze around it** — a spanning tree is grown into every *other* room, hanging off the path, so
+   the route is indistinguishable from the offshoots and dead ends.
+3. **Crawl is pure playback** — her head is `progress` mapped along the route; the route's tail
+   serpentines the egg chamber so her **whole body coils onto the floor**, then the happy ending
+   plays. Legs, body ripple, egg quiver and the fish are procedural from elapsed time.
 
-There's no physics and effectively no precompute — generation is a couple of cheap graph walks
-(≤ ~60ms even on a huge terminal), and it always lands exactly on time.
+There's no physics and no heavy precompute — generation is a couple of cheap graph walks (built once
+on the first frame), and it always lands on time.
+
+**Tuning** (top of `maze.py`): `COMPONENTS_PER_WANDER_ROOM` — *lower = windier & a bit faster*;
+`BEELINE_CHOICES` — raise for a meandering (windier, less predictable) final approach;
+`BODY_MIN/MAX`, `ENDING_FRAC`, `FISH_MIN_W/MAX_W`.
 
 ## Install
 
