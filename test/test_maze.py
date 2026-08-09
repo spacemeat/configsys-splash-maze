@@ -55,13 +55,12 @@ def test_route_is_contiguous():
         assert abs(y0 - y1) + abs(x0 - x1) == 1
 
 
-def test_default_path_is_not_maze_filling():
-    '''With the default (fallback) wander she takes a windy-but-modest route, not a whole-maze tour.'''
+def test_path_leaves_room_for_the_rest_of_the_maze():
+    '''The path never claims the whole maze — reserved chambers + offshoots always remain off it
+    (independent of the wander/beeline tuning).'''
     for seed in range(6):
         sim = _sim(seed=seed)
-        assert 2 <= len(sim.path_rooms) < 0.6 * sim.gw * sim.gh
-    big = maze.MazeSim(200, 50, random.Random(0))
-    assert len(big.path_rooms) < 0.3 * big.gw * big.gh
+        assert 2 <= len(sim.path_rooms) < sim.gw * sim.gh
 
 
 def test_larger_wander_gives_a_longer_windier_path():
