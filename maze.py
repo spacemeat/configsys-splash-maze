@@ -67,7 +67,7 @@ ENDING_FRAC = 0.12                 # last fraction of the run: she's coiled on t
 # So she paces to the real work: a bigger load = a windier, longer trip at the SAME crawl speed.
 #   wander ≈ components / COMPONENTS_PER_WANDER_ROOM   (floored, and capped to a fraction of the maze)
 # Lower COMPONENTS_PER_WANDER_ROOM ⇒ a WINDIER, slightly faster crawl (more looping per component).
-COMPONENTS_PER_WANDER_ROOM = 2.0
+COMPONENTS_PER_WANDER_ROOM = 3.0
 WANDER_MIN, WANDER_MAX_FRAC = 6, 0.8
 BEELINE_CHOICES = 4                            # after wandering, approach the nest directly (1); the
                                                # WANDER carries the windiness. Raise for a meandering
@@ -517,12 +517,14 @@ class MazeSplash(Splash):
             if arrived and int(base * 1.7 + i) % 2:
                 dx = 1 if i % 2 else -1
             self._add(y, x + dx, jig, self._egg_warm if arrived else self._egg)
-        if arrived:                                          # a happy flourish just above her head
-            hy, hx = sim.route[min(len(sim.route) - 1, int(sim.head_index()))]
+        if arrived:                                          # a happy flourish above her, over the
+            hy, _ = sim.route[min(len(sim.route) - 1, int(sim.head_index()))]   # nest — centred in the
+            y0, y1, x0, x1 = sim.chamber_box                                    # chamber so it never
+            cx = (x0 + x1) // 2                                                 # clips the walls
             for k in range(3):
                 fy = hy - 1 - (int(frame.elapsed * 4 + k) % 2)   # bob a row or two over her head
-                fx = hx + (k - 1) * 2                            # spread a little left/right
-                if fy >= 0:
+                fx = cx + (k - 1) * 2                            # spread a little around centre
+                if fy >= 0 and x0 <= fx <= x1 and sim.open[fy][fx]:
                     self._add(fy, fx, HEART if k % 2 else SPARKLE[int(frame.elapsed * 5 + k) % 3],
                               self._heart)
 
