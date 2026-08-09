@@ -1,24 +1,26 @@
 '''maze.py — the "maze" startup splash for configsys, as a code plugin.
 
 A 2-D brick maze fills the screen: walls are courses of bricks (each brick is the two side-by-side
-block glyphs 🬗🬤, in brick-red and grey). Somewhere in the lower half sits a small sealed CHAMBER
-holding a fish flopping on dry stone — the chamber has a single doorway in its ceiling. Liquid (a
-random colour each run) pours in through a gap at the top of the screen and floods the maze under
-hydrostatic physics: it falls where it can, pools, and — because connected water shares a common
-level — climbs adjacent passages (U-tube) and overflows the low lips. The chamber's lone ceiling
-door means it stays dry until the surrounding water has risen to it; then it pours in and fills, and
-the fish, now afloat, stops flopping and swims. The simulation is DONE when the chamber is full.
+block glyphs 🬗🬤, brick-red glyph on cement-grey mortar). Somewhere in the lower half sits a small
+sealed CHAMBER holding a fish flopping on dry stone — the chamber has a single doorway high in one
+side wall. Liquid (a random colour each run) pours in through a gap at the top and floods the maze:
+it falls where it can, pools, and — because connected water shares a common level — climbs adjacent
+passages (U-tube) and overflows the low lips. The chamber's lone side door means it stays dry until
+the surrounding water rises to it; then it fills, and the fish, now afloat, stops flopping and
+swims. The simulation is DONE when the chamber is full.
 
-Because the fill must be exact and properly timed, the whole constant-inflow pour is SOLVED ONCE up
-front (MazeSim precomputes a timeline of frames ending the instant the chamber tops off); the
-animation then plays that timeline back against inspection progress (eased, rate-capped) so the
-chamber fills just as inspection completes — no added latency, no dead air.
+The pour is stepped FORWARD IN TIME (MazeSim precomputes one frame per step) so it reads as real
+flow: it starts bone dry, the stream is revealed as its front DESCENDS from the inlet, pools rise,
+and — once the surface reaches the chamber door — part of the constant inflow is diverted into the
+chamber (rate-limited, so it fills gradually floor->ceiling) while the outside keeps rising on the
+rest. The precomputed timeline is then played back against inspection progress (eased, rate-capped)
+so the chamber fills just as inspection completes — no added latency, no dead air.
 
-The fill is a level model: for a surface height L, a breadth-first flood from the inlet lets water
-FALL for free (the visible streams) and POOL only through submerged cells (those whose floor is
-below L), so a body of water finds one common level (U-tube), overflows the lowest lip to cascade
-on, and a top-doored pocket like the chamber floods only once L reaches its door. Frames are spaced
-by equal VOLUME, so the on-screen flow rate is constant. Volume is conserved by construction.
+Pooling itself is a fast level-flood (so surfaces are instantly flat, no slow relaxation): for a
+surface height L, a breadth-first flood from the inlet lets water FALL for free (the visible
+streams) and POOL only through submerged cells (floor below L), finding one common level (U-tube),
+overflowing the lowest lip to cascade on. Constant inflow -> constant flow rate; volume conserved by
+construction.
 
 Ships as a configsys splash provider (see configsys/splashes.py for the ABI): the HOST
 (configsys.tui.splash.run_splash) owns the frame loop and calls render(frame); MazeSim is the
@@ -51,13 +53,25 @@ FLOP = ('◟▪◞', '◜▪◝', '◠▪◠')
 CELL_W, CELL_H = 4, 2               # open interior of one maze cell
 WALL_T = 2                          # wall thickness — 2 keeps bricks a running bond in both axes
 
+# brick masonry: a fixed fg-on-bg — brick-red glyph, cement-grey mortar behind it
+BRICK_FG = (150, 54, 40)
+BRICK_BG = (108, 104, 98)
+
 # -- tuning (all visual; safe to tweak) ---------------------------------------
 FPS = 30.0
 MIN_DURATION = 2.6                  # play at least this long so the pour is enjoyable on fast boxes
-PLAY_EASE = 3.0                     # cursor eases toward progress at this rate (per second)
-MAX_FRAMES = 240                    # timeline is sampled to at most this many equal-volume frames
-GEN_TRIES = 4                       # generate this many mazes; keep the one that fills the chamber latest
-L_STEP = 0.25                       # level granularity when profiling volume vs. surface height
+PLAY_EASE = 3.6                     # cursor eases toward progress at this rate (per second)
+MAX_FRAMES = 260                    # the timeline is sampled to at most this many frames
+# The pour is stepped FORWARD IN TIME (one recorded frame per step) so the stream visibly descends
+# from empty and the chamber fills only once the flow reaches its door — the timeline IS the flow,
+# not a static fill paced by pooled volume. Pooling itself is a fast level-flood (instant flat
+# surfaces); the forward loop just advances the volume and the reveal front, and rate-limits the
+# chamber. Constant inflow -> constant flow rate; volume is conserved by construction.
+INJECT = 2.0                        # volume poured in each step (the flow rate)
+DESCENT_STEPS = 14                  # steps for the stream's reveal front to reach the far end
+CHAM_SHARE = 0.55                   # fraction of inflow diverted into the chamber once its door opens
+MAX_STEPS = 1500                    # safety cap on the forward sim
+SETTLE_TAIL = 6                     # hold the brimming end a moment so it reads still
 
 
 def _hsv(h, s, v):
@@ -91,15 +105,8 @@ class MazeSim:
         self.H = max(12, int(h))
         self.rng = rng
         self._dims()
-        best = None
-        for _ in range(GEN_TRIES):
-            self._generate()
-            frames = self._precompute()
-            score = self._wetness(frames[-1])      # more of the maze wet at chamber-full = nicer
-            if best is None or score > best[0]:
-                best = (score, frames, self._snapshot())
-        _, self.frames, snap = best
-        self._restore(snap)
+        self._generate()
+        self.frames = self._simulate()             # forward-time pour -> one frame per step
         self.n = len(self.frames)
         self._p = 0.0                              # progress target (monotonic)
         self._cursor = 0.0                         # eased playback position in [0, n-1]
@@ -215,156 +222,154 @@ class MazeSim:
         self.chamber_set = set(self.chamber_cells)
         self.chamber_top_e = max(self.H - 1 - y for (y, x) in self.chamber_cells)
         self.chamber_floor_e = min(self.H - 1 - y for (y, x) in self.chamber_cells)
-        # the outside cells just past the chamber's walls — water reaching one of these (submerged)
-        # is what opens the door and starts the chamber backfilling.
-        doors = set()
-        for (y, x) in self.chamber_cells:
-            for ny, nx in ((y, x - 1), (y, x + 1), (y - 1, x), (y + 1, x)):
-                if (0 <= ny < self.H and 0 <= nx < self.W and self.open[ny][nx]
-                        and (ny, nx) not in self.chamber_set):
-                    doors.add((ny, nx))
-        self.outside_door_cells = sorted(doors)
         self._open_set = set(self.open_cells)
 
-    def _snapshot(self):
-        return ([row[:] for row in self.wall], self.source, self.chamber_rc)
+    # -- the forward-time pour --------------------------------------------
 
-    def _restore(self, snap):
-        self.wall, self.source, self.chamber_rc = snap
-        self._finish()
-
-    # -- the level-flood pour ---------------------------------------------
-
-    def _flood(self, L, block=None):
-        '''Water reachable from the inlet at surface level L. Streams FALL for free; a submerged
-        cell (floor elevation < L) also spreads to submerged horizontal/upper neighbours (the pool
-        finding its level). `block` (a cell set) is treated as sealed — used to hold the chamber back
-        during phase A. Returns a `reach` grid — the wet cells this frame.'''
+    def _flood(self, L, block):
+        '''Cells the water occupies at outside surface level L: streams FALL for free, and a
+        submerged cell (floor below L) spreads to submerged horizontal/upper neighbours (the pool
+        finding one level — U-tube) or, if it can't fall, sheets across a ledge to the next drop.
+        `block` (the chamber) is sealed. Fast — one BFS. Returns the wet grid.'''
         H, W, op = self.H, self.W, self.open
-        blocked = block or ()
         reach = [[False] * W for _ in range(H)]
         sy, sx = self.source
         reach[sy][sx] = True
         dq = deque([(sy, sx)])
         while dq:
             y, x = dq.popleft()
-            can_fall = y + 1 < H and op[y + 1][x] and (y + 1, x) not in blocked
-            if can_fall and not reach[y + 1][x]:                       # FALL (free)
+            can_fall = y + 1 < H and op[y + 1][x] and (y + 1, x) not in block
+            if can_fall and not reach[y + 1][x]:
                 reach[y + 1][x] = True
                 dq.append((y + 1, x))
-            # spread sideways to a submerged neighbour (the pool finding its level) OR, if this cell
-            # can't fall, across the ledge as a sheet seeking the next drop (a cascade)
             for ny, nx in ((y, x - 1), (y, x + 1)):
-                if (0 <= nx < W and op[ny][nx] and not reach[ny][nx] and (ny, nx) not in blocked
+                if (0 <= nx < W and op[ny][nx] and not reach[ny][nx] and (ny, nx) not in block
                         and ((H - 1 - ny) < L or not can_fall)):
                     reach[ny][nx] = True
                     dq.append((ny, nx))
-            ny = y - 1                                                 # POOL rising: up into submerged
-            if (ny >= 0 and op[ny][x] and not reach[ny][x] and (ny, x) not in blocked
+            ny = y - 1
+            if (ny >= 0 and op[ny][x] and not reach[ny][x] and (ny, x) not in block
                     and (H - 1 - ny) < L):
                 reach[ny][x] = True
                 dq.append((ny, x))
         return reach
 
     def _volume(self, L, reach):
-        v = 0.0
         H = self.H
-        for (y, x) in self.open_cells:
-            if reach[y][x]:
-                d = L - (H - 1 - y)
-                if d > 0:
-                    v += 1.0 if d >= 1 else d
-        return v
+        return sum(min(1.0, L - (H - 1 - y)) for (y, x) in self.open_cells
+                   if reach[y][x] and L > (H - 1 - y))
 
-    def _grid_at(self, L, reach):
-        '''Per-cell render level: 8 fully submerged, 1..7 a pooled surface eighth, -1 a falling
-        stream (wet but above the surface), 0 dry.'''
-        H, W = self.H, self.W
-        grid = [[0] * W for _ in range(H)]
-        for (y, x) in self.open_cells:
-            if not reach[y][x]:
-                continue
-            d = L - (H - 1 - y)
-            if d <= 0:
-                grid[y][x] = -1                      # reached by falling, still above the surface
-            elif d >= 1:
-                grid[y][x] = 8
-            else:
-                lvl = int(d * 8 + 0.5)
-                grid[y][x] = 8 if lvl > 8 else (1 if lvl < 1 else lvl)
-        return grid
-
-    def _chamber_backfill_vol(self, cl):
-        '''Chamber water volume when its own surface sits at local level `cl` (floor -> ceiling).'''
-        H = self.H
-        return sum(min(1.0, max(0.0, cl - (H - 1 - y))) for (y, x) in self.chamber_cells)
-
-    def _precompute(self):
-        '''Two phases, then sampled at EQUAL VOLUME (constant flow) across both:
-          A) the OUTSIDE floods (chamber sealed) until water reaches the chamber door; then
-          B) the outside holds and the CHAMBER backfills floor -> ceiling, ending when it's full.
-        Phase A gives the rising maze; phase B the gradual chamber fill + the fish going afloat.'''
-        H, cham = self.H, self.chamber_set
-        Lc = self.chamber_top_e + 0.5                      # the side door opens as the outside rises
-        profile = []                                       # (L, outside-volume) for phase A         # to the chamber's top: only the lower maze floods, the upper stays dry
-        L = 0.0
-        while L < Lc:
-            profile.append((L, self._volume(L, self._flood(L, block=cham))))
-            L += L_STEP
-        profile.append((Lc, self._volume(Lc, self._flood(Lc, block=cham))))
-        v_a = profile[-1][1]                               # outside volume when the door opens
-        reach_c = self._flood(Lc, block=cham)              # frozen outside state for phase B
-        c_top = self.chamber_top_e + 1.0
-        v_b = self._chamber_backfill_vol(c_top)
-        v_tot = v_a + v_b
-        nf = min(MAX_FRAMES, max(24, int(v_tot / 3) + 8))
-        frames = []
-        for k in range(nf):
-            vk = v_tot * k / (nf - 1)
-            if vk <= v_a:                                  # phase A: outside rising
-                lk = self._invert(profile, vk)
-                frames.append(self._grid_at(lk, self._flood(lk, block=cham)))
-            else:                                          # phase B: chamber backfilling
-                cl = self._invert_fn(self._chamber_backfill_vol, self.chamber_floor_e, c_top, vk - v_a)
-                frames.append(self._render_backfill(Lc, reach_c, cl))
-        return frames
-
-    def _render_backfill(self, Lc, reach_c, cl):
-        '''Outside frozen at level Lc; the chamber filled to its own local level cl.'''
-        grid = self._grid_at(Lc, reach_c)
-        H = self.H
-        for (y, x) in self.chamber_cells:
-            d = cl - (H - 1 - y)
-            grid[y][x] = 0 if d <= 0 else 8 if d >= 0.92 else max(1, min(7, int(d * 8 + 0.5)))
-        return grid
+    def _arrival(self, block):
+        '''BFS step at which the flow FRONT first reaches each outside cell, spreading only DOWN and
+        SIDEWAYS from the inlet (never up) — the order the pouring water physically arrives, used to
+        reveal the descending stream over time instead of all at once.'''
+        H, W, op = self.H, self.W, self.open
+        arr = [[10 ** 9] * W for _ in range(H)]
+        sy, sx = self.source
+        arr[sy][sx] = 0
+        dq = deque([(sy, sx)])
+        while dq:
+            y, x = dq.popleft()
+            d = arr[y][x] + 1
+            for ny, nx in ((y + 1, x), (y, x - 1), (y, x + 1)):
+                if (0 <= ny < H and 0 <= nx < W and op[ny][nx] and (ny, nx) not in block
+                        and arr[ny][nx] > d):
+                    arr[ny][nx] = d
+                    dq.append((ny, nx))
+        return arr
 
     @staticmethod
     def _invert(table, v):
-        '''Surface level L whose flood volume is v, by linear interp over the monotone profile.'''
+        '''Level L whose volume is v, by linear interp over the monotone (L, volume) profile.'''
         if v <= table[0][1]:
             return table[0][0]
         for (l0, v0), (l1, v1) in zip(table, table[1:]):
             if v <= v1:
-                t = 0.0 if v1 == v0 else (v - v0) / (v1 - v0)
-                return l0 + (l1 - l0) * t
+                return l0 if v1 == v0 else l0 + (l1 - l0) * (v - v0) / (v1 - v0)
         return table[-1][0]
 
-    @staticmethod
-    def _invert_fn(f, lo, hi, v):
-        '''Level in [lo, hi] whose monotone volume f() equals v, by bisection.'''
+    def _chamber_level(self, v):
+        '''Local surface level (floor->ceiling) at which the chamber holds volume v — bisected.'''
+        H = self.H
+        lo, hi = float(self.chamber_floor_e), self.chamber_top_e + 1.2
         if v <= 0:
             return lo
-        for _ in range(32):
+
+        def vol(cl):
+            return sum(min(1.0, max(0.0, cl - (H - 1 - y))) for (y, x) in self.chamber_cells)
+
+        for _ in range(28):
             mid = (lo + hi) / 2
-            if f(mid) < v:
+            if vol(mid) < v:
                 lo = mid
             else:
                 hi = mid
         return (lo + hi) / 2
 
-    def _wetness(self, grid):
-        wet = sum(1 for (y, x) in self.open_cells if grid[y][x] != 0)
-        return wet / max(1, len(self.open_cells))
+    def _build(self, L, arrival, front, v_cham, block):
+        '''One frame: the outside pool at level L (stream cells revealed only once the front has
+        reached them), plus the chamber filled to volume v_cham. Levels 0..8 (falling vs. pooled is
+        decided at draw time from the cell below).'''
+        H = self.H
+        reach = self._flood(L, block)
+        grid = [[0] * self.W for _ in range(H)]
+        for (y, x) in self.open_cells:
+            if (y, x) in block or not reach[y][x]:
+                continue
+            d = L - (H - 1 - y)
+            if d >= 1:
+                grid[y][x] = 8                               # submerged pool
+            elif d > 0:
+                grid[y][x] = max(1, min(7, int(d * 8 + 0.5)))  # pool surface
+            elif arrival[y][x] <= front:
+                grid[y][x] = 4                               # a falling stream the front has reached
+        if v_cham > 0:
+            cl = self._chamber_level(v_cham)
+            for (y, x) in self.chamber_cells:
+                d = cl - (H - 1 - y)
+                grid[y][x] = 8 if d >= 0.92 else (max(1, min(7, int(d * 8 + 0.5))) if d > 0 else 0)
+        return grid
+
+    def _simulate(self):
+        '''Pour forward in time from EMPTY: each step injects a constant flow, the outside surface
+        rises off that volume, and the stream is revealed as its front descends. Once the surface
+        reaches the chamber's side door, part of the inflow is diverted into the chamber (rate-
+        limited, so it fills gradually floor->ceiling) while the outside keeps rising on the rest —
+        so the chamber fills visibly WITH the ongoing flow, not in a frozen phase. One frame per
+        step (the timeline IS the flow); ends when the chamber brims.'''
+        block = self.chamber_set
+        door_e = self.chamber_top_e
+        arrival = self._arrival(block)
+        far = max((arrival[y][x] for (y, x) in self.open_cells if arrival[y][x] < 10 ** 9), default=1)
+        front_speed = max(1.0, far / DESCENT_STEPS)          # reveal the stream over ~DESCENT_STEPS
+        profile = []                                         # (L, outside volume) up the whole maze
+        L = 0.0
+        while L <= self.H + 1:
+            profile.append((L, self._volume(L, self._flood(L, block))))
+            L += 0.34
+        cham_cap = float(len(self.chamber_cells))
+        inject = max(INJECT, len(self.open_cells) / 400.0)   # scale flow with size: ~constant #steps
+        v_out = v_cham = 0.0
+        frames = [self._build(0.0, arrival, 0.0, 0.0, block)]   # frame 0: bone dry, t=0
+        t = 1
+        while t <= MAX_STEPS:
+            Lc = self._invert(profile, v_out)
+            door_open = Lc >= door_e - 0.5
+            if door_open and v_cham < cham_cap:
+                dC = min(inject * CHAM_SHARE, cham_cap - v_cham)
+                v_cham += dC
+                v_out += inject - dC
+            else:
+                v_out += inject
+            frames.append(self._build(self._invert(profile, v_out), arrival, t * front_speed, v_cham, block))
+            if door_open and v_cham >= cham_cap - 1e-6:
+                break
+            t += 1
+        for _ in range(SETTLE_TAIL):                         # hold the brimming end a moment
+            frames.append(frames[-1])
+        if len(frames) > MAX_FRAMES:
+            frames = [frames[round(i * (len(frames) - 1) / (MAX_FRAMES - 1))] for i in range(MAX_FRAMES)]
+        return frames
 
     # -- runtime ----------------------------------------------------------
 
@@ -425,30 +430,21 @@ class MazeSplash(Splash):
         self._shimmer = pal.rgb_attr(_lerp(surface, (255, 255, 255), 0.35)) | curses.A_BOLD
         self._fish = [pal.rgb_pair(fish, c) | curses.A_BOLD for c in ramp]
         self._fish_dry = pal.rgb_attr(fish) | curses.A_BOLD
-        self._brick = pal.rgb_attr((150, 54, 40)) | curses.A_BOLD      # brick-red
-        self._brick2 = pal.rgb_attr((96, 46, 40))                      # a darker course
-        self._grey = pal.rgb_attr((120, 120, 128))                     # the odd grey brick
+        self._brick_attr = pal.rgb_pair(BRICK_FG, BRICK_BG)            # brick-red on cement-grey
         self._label_attr = pal.get('title') | curses.A_BOLD
         self._bake_bricks()
 
     def _bake_bricks(self):
-        '''Precompute each wall char's glyph + colour: a running-bond masonry (bricks 2 chars wide,
-        offset one half each course) in brick-red with scattered grey bricks and a darker alternate
-        course, so a wall reads as stone rather than a flat slab.'''
+        '''Precompute each wall char's brick glyph — a running-bond masonry (bricks 2 chars wide,
+        offset one half each course). Colour is uniform: brick-red foreground on a cement-grey
+        background (the glyph carves the brick, the background shows as mortar).'''
         sim = self.sim
         self._wg = [[None] * sim.W for _ in range(sim.H)]
         for y in range(sim.H):
             shift = y % 2
             for x in range(sim.W):
-                if not sim.wall[y][x]:
-                    continue
-                bx = x + shift
-                glyph = BRICK_L if bx % 2 == 0 else BRICK_R
-                if (y * 131 + (bx // 2) * 17) % 7 == 0:
-                    attr = self._grey
-                else:
-                    attr = self._brick if y % 2 == 0 else self._brick2
-                self._wg[y][x] = (glyph, attr)
+                if sim.wall[y][x]:
+                    self._wg[y][x] = BRICK_L if (x + shift) % 2 == 0 else BRICK_R
 
     def _band(self, height_from_bottom):
         ratio = 0.0 if self.h <= 1 else height_from_bottom / self.h
@@ -461,20 +457,21 @@ class MazeSplash(Splash):
         sim, scr = self.sim, self.scr
         grid = sim.frame()
         scr.erase()
+        brick = self._brick_attr
         for y in range(sim.H):                               # bricks (static masonry)
             wg = self._wg[y]
             for x in range(sim.W):
                 if wg[x] is not None:
-                    self._add(y, x, wg[x][0], wg[x][1])
-        H = sim.H
+                    self._add(y, x, wg[x], brick)
+        H, op = sim.H, sim.open
         for (y, x) in sim.open_cells:
             lvl = grid[y][x]
             if lvl == 0:
                 continue
-            if lvl == -1:
-                self._draw_stream(y, x, frame)               # falling water
-            elif lvl >= 8:
+            if lvl >= 8:
                 self._add(y, x, FULL, self._band(H - 1 - y))
+            elif y + 1 < H and op[y + 1][x] and grid[y + 1][x] < 8:
+                self._draw_stream(y, x, frame)               # water still draining down here
             else:
                 self._add(y, x, EIGHTHS[lvl], self._surface)  # a pooled surface
         self._draw_fish(frame, grid)

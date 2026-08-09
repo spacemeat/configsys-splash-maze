@@ -64,7 +64,7 @@ def test_chamber_has_a_single_doorway():
 # -- the level-flood physics (isolated) -----------------------------------
 
 def _phys(open_grid, source):
-    '''A bare object carrying just what MazeSim._flood/_volume read, for pure-physics tests.'''
+    '''A bare object carrying just what MazeSim._flood reads, for pure-physics tests.'''
     H = len(open_grid)
     W = len(open_grid[0])
     return types.SimpleNamespace(
@@ -73,19 +73,18 @@ def _phys(open_grid, source):
 
 
 def test_u_tube_water_finds_a_common_level():
-    '''The hydrostatic crux: water poured into one arm of a U pools to the SAME surface level in the
-    other arm (it climbs the far shaft). Two vertical shafts joined only along the bottom; the inlet
-    sits atop the left shaft.'''
+    '''The hydrostatic crux: at surface level L, both arms of a U are wet to the SAME level (water
+    climbs the far shaft). Two vertical shafts joined only along the bottom; inlet atop the left.'''
     H, W = 9, 5
     grid = [[False] * W for _ in range(H)]
-    for y in range(0, H):                                    # left shaft x=1 (inlet at top), right x=3
+    for y in range(0, H):                                    # left shaft x=1 (inlet), right shaft x=3
         grid[y][1] = True
     for y in range(1, H):
         grid[y][3] = True
     for x in range(1, 4):                                    # joined along the bottom row
         grid[H - 1][x] = True
     o = _phys(grid, source=(0, 1))
-    reach = maze.MazeSim._flood(o, 3.0)                      # surface 3 rows up from the bottom
+    reach = maze.MazeSim._flood(o, 3.0, block=set())         # surface 3 rows up from the bottom
     for e in (0, 1, 2):                                      # both arms submerged to the SAME level
         y = H - 1 - e
         assert reach[y][1] and reach[y][3]
@@ -99,16 +98,27 @@ def test_side_doored_pocket_gates_on_the_rising_level():
     grid = [[False] * W for _ in range(H)]
     for y in range(0, H):                                    # inlet shaft on the right, x=4
         grid[y][4] = True
-    for y in range(3, H):                                    # the pocket: a sealed box at x=1, rows 3..9
+    for y in range(3, H):                                    # a sealed box at x=1, rows 3..9
         grid[y][1] = True
     door_row = 3                                             # its ONLY opening: a side door at row 3
-    grid[door_row][2] = grid[door_row][3] = True            # ...connecting pocket (x=1) to shaft (x=4)
+    grid[door_row][2] = grid[door_row][3] = True            # connecting pocket (x=1) to shaft (x=4)
     o = _phys(grid, source=(0, 4))
     door_e = H - 1 - door_row
-    low = maze.MazeSim._flood(o, door_e - 0.5)               # surface just below the door
+    low = maze.MazeSim._flood(o, door_e - 0.5, block=set())  # surface just below the door
     assert not any(low[y][1] for y in range(4, H))           # pocket interior still bone dry
-    high = maze.MazeSim._flood(o, door_e + 0.5)              # surface risen past the door
+    high = maze.MazeSim._flood(o, door_e + 0.5, block=set())  # surface risen past the door
     assert high[H - 1][1]                                    # now the pocket floods
+
+
+def test_flood_volume_is_monotone_in_level():
+    '''More surface height never means less water — the profile the forward sim inverts is monotone.'''
+    H, W = 10, 4
+    grid = [[y > 0 and x == 1 for x in range(W)] for y in range(H)]   # one open shaft, x=1
+    o = _phys(grid, source=(0, 1))
+    vols = [maze.MazeSim._volume(o, L, maze.MazeSim._flood(o, L, block=set()))
+            for L in (0.0, 1.0, 2.0, 4.0, 8.0)]
+    for a, b in zip(vols, vols[1:]):
+        assert b >= a
 
 
 # -- the pour timeline ----------------------------------------------------

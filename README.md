@@ -7,9 +7,9 @@ trusted **code plugin**, exactly like a driver plugin, exporting a `Splash` prov
 ## What you see
 
 A 2-D **brick maze** fills the screen — walls are courses of bricks (each brick is the two
-side-by-side block glyphs `🬗🬤`, in brick-red and grey, laid in a running bond). Somewhere in the
-lower half is a small sealed **chamber** with a single doorway high in one side wall, holding a
-little fish flopping on dry stone.
+side-by-side block glyphs `🬗🬤`, a brick-red glyph on cement-grey mortar, laid in a running bond).
+Somewhere in the lower half is a small sealed **chamber** with a single doorway high in one side
+wall, holding a little fish flopping on dry stone.
 
 A random-coloured **liquid** pours in through a gap at the top and floods the maze under
 hydrostatic physics:
@@ -25,17 +25,18 @@ The simulation is **done when the chamber is full**.
 
 ## How it's timed
 
-The fill must be exact and land on time, so the whole constant-inflow pour is **solved once up
-front** (`MazeSim` precomputes a timeline of frames ending the instant the chamber tops off), then
-played back against configsys's inspection **progress** — eased and rate-capped — so the chamber
-fills just as inspection completes: no added latency, no dead air. Frames are spaced by equal
-**volume**, so the on-screen flow rate is constant; volume is conserved by construction.
+The pour is stepped **forward in time** — `MazeSim` precomputes one frame per step, so the timeline
+*is* the flow: it starts bone dry, the stream is revealed as its front **descends** from the inlet,
+pools rise, and once the surface reaches the chamber door part of the constant inflow is **diverted
+into the chamber** (rate-limited, so it fills gradually floor→ceiling) while the outside keeps rising
+on the rest — so the chamber fills *with* the ongoing flow, not in a frozen phase. That precomputed
+timeline is then played back against configsys's inspection **progress** — eased and rate-capped —
+so the chamber tops off just as inspection completes: no added latency, no dead air.
 
-The pour is a *level* model: for a surface height `L`, a breadth-first flood from the inlet lets
-water fall and cascade freely and pool only through submerged cells, so it finds a common level,
-overflows the lowest lip, and a side-doored pocket floods only once `L` reaches its door. The
-chamber then fills as an explicit second phase (outside held, chamber rising floor→ceiling), which
-is what makes its fill gradual and last.
+Pooling is a fast *level-flood* (surfaces are instantly flat, no slow relaxation): for a surface
+height `L`, a breadth-first flood from the inlet lets water fall and cascade freely and pool only
+through submerged cells, so it finds one common level (U-tube) and overflows the lowest lip.
+Constant inflow → constant flow rate; volume is conserved by construction.
 
 ## Install
 
