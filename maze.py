@@ -73,7 +73,8 @@ BEELINE_CHOICES = 4                            # after wandering, approach the n
                                                # WANDER carries the windiness. Raise for a meandering
                                                # (windier but longer, less predictable) approach.
 GEN_TRIES = 60                     # path attempts; keep the best-length winding route
-FISH_MIN_W, FISH_MAX_W = 3, 6      # only basins this many blocks wide get fish
+FISH_MIN_W, FISH_MAX_W = 3, 6      # only basins this many blocks wide are eligible for fish
+MAX_FISH_BASINS = 3                # ...and at most this many basins actually get them
 
 
 def _hsv(h, s, v):
@@ -377,12 +378,17 @@ class MazeSim:
             ch['basin'] = ch['depth'] >= 1
             ch['fish'] = ch['basin'] and FISH_MIN_W <= ch['width'] <= FISH_MAX_W
             ch['fishes'] = []
-            if ch['fish']:
-                fits = [i for i in range(len(FISH_RIGHT)) if len(FISH_RIGHT[i]) <= x1 - x0]
-                for k in range(max(1, ch['width'] // 2)):
-                    i = (fits or range(len(FISH_RIGHT)))[self.rng.randrange(len(fits) or len(FISH_RIGHT))]
-                    ch['fishes'].append({'r': FISH_RIGHT[i], 'l': FISH_LEFT[i], 'row': k,
-                                         'phase': self.rng.uniform(0, 6.28)})
+        # cap how many basins actually get fish (the rest stay water-only)
+        eligible = [ch for ch in self.chambers if ch['fish']]
+        self.rng.shuffle(eligible)
+        for ch in eligible[MAX_FISH_BASINS:]:
+            ch['fish'] = False
+        for ch in eligible[:MAX_FISH_BASINS]:
+            fits = [i for i in range(len(FISH_RIGHT)) if len(FISH_RIGHT[i]) <= ch['x1'] - ch['x0']]
+            for k in range(max(1, ch['width'] // 2)):
+                i = (fits or range(len(FISH_RIGHT)))[self.rng.randrange(len(fits) or len(FISH_RIGHT))]
+                ch['fishes'].append({'r': FISH_RIGHT[i], 'l': FISH_LEFT[i], 'row': k,
+                                     'phase': self.rng.uniform(0, 6.28)})
 
     # -- runtime ----------------------------------------------------------
 
