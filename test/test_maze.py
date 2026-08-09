@@ -55,11 +55,23 @@ def test_route_is_contiguous():
         assert abs(y0 - y1) + abs(x0 - x1) == 1
 
 
-def test_path_length_is_in_the_target_band():
+def test_path_is_a_modest_fraction_not_maze_filling():
+    '''She wanders a bit then beelines to the nest — a modest route, not a maze-filling tour (so the
+    crawl stays slow), even on a big maze.'''
     for seed in range(6):
         sim = _sim(seed=seed)
-        frac = len(sim.path_rooms) / (sim.gw * sim.gh)
-        assert maze.PATH_LO - 0.12 <= frac <= maze.PATH_HI + 0.12   # tuned length, with slack
+        assert 2 <= len(sim.path_rooms) < 0.35 * sim.gw * sim.gh
+    big = maze.MazeSim(200, 50, random.Random(0))
+    assert len(big.path_rooms) < 0.2 * big.gw * big.gh
+
+
+def test_whole_body_ends_inside_the_chamber():
+    '''The route serpentines the egg chamber, so its last body-length of cells all lie in the
+    chamber box — her whole centipede coils onto the floor, not just the head.'''
+    sim = _sim(seed=1)
+    y0, y1, x0, x1 = sim.chamber_box
+    for (y, x) in sim.route[-sim.body:]:
+        assert y0 <= y <= y1 and x0 <= x <= x1
 
 
 def test_chambers_sit_off_the_route():
@@ -118,7 +130,7 @@ def test_progress_is_monotonic_and_clamped():
     assert sim._p == 1.0                                   # clamped
 
 
-def test_reaches_the_eggs_and_the_ending_at_full_progress():
+def test_reaches_the_eggs_at_full_progress():
     sim = _sim(seed=4)
     sim.set_progress(1.0)
     for _ in range(400):
@@ -126,4 +138,4 @@ def test_reaches_the_eggs_and_the_ending_at_full_progress():
         if sim.filled:
             break
     assert sim.filled and sim.arrived
-    assert int(sim.head_index()) == len(sim.route) - 1     # head is home among the eggs
+    assert int(sim.head_index()) == len(sim.route) - 1     # head is home at the nest

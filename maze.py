@@ -34,9 +34,18 @@ EGG = '○'
 EGG_JIGGLE = ('○', '◌', '◯')       # egg quiver frames
 HEART = '♥'
 SPARKLE = ('✦', '✧', '⋆')
-EIGHTHS = ' ▁▂▃▄▅▆▇█'              # pool water height
-FISH_R = ('◄▪►', '◄▪▪►')
-FISH_L = ('◄▪►', '◄▪▪►')
+
+# Fish (from configsys-splash-ocean): [tail bracket][taper tri][1-3 body][head tri]; the head points
+# the swim direction. Two sizes (big ■/◀▶, small ▪/◄►) and assorted ornamental tail brackets.
+_TAILS = ('❨❩', '❪❫', '❬❭', '❮❯', '❰❱', '❲❳', '❴❵')
+_FISH_SIZES = (('■', '◀', '▶'), ('▪', '◄', '►'))
+FISH_RIGHT, FISH_LEFT = [], []
+for _b, _lt, _rt in _FISH_SIZES:
+    for _n in (1, 2, 3):
+        for _ob, _cb in _TAILS:
+            FISH_RIGHT.append(_cb + _lt + _b * _n + _rt)   # ❩◀■▶  tail, taper, body, head
+            FISH_LEFT.append(_lt + _b * _n + _rt + _ob)    # ◄▪►❰
+FISH_RIGHT, FISH_LEFT = tuple(FISH_RIGHT), tuple(FISH_LEFT)
 
 # -- geometry -----------------------------------------------------------------
 CW = 2                             # a maze cell is CW chars wide x 1 tall (≈ square on a terminal)
@@ -45,10 +54,15 @@ CW = 2                             # a maze cell is CW chars wide x 1 tall (≈ 
 FPS = 30.0
 MIN_DURATION = 2.8
 PLAY_EASE = 3.2                    # the crawl eases toward progress at this rate (per second)
-BODY_MIN, BODY_MAX = 8, 16         # centipede body length (segments), scaled to the maze
-ENDING_FRAC = 0.13                 # last fraction of the run: she's home on the floor, hearts play
-PATH_LO, PATH_HI = 0.17, 0.31      # target path length (fraction of rooms) — halved so she crawls
-                                   # slower: each block spans ~2 components now, not one
+BODY_MIN, BODY_MAX = 8, 18         # centipede body length (segments), scaled to the maze
+ENDING_FRAC = 0.12                 # last fraction of the run: she's coiled on the floor, hearts play
+# Route length sets the crawl SPEED (she covers it over the run, so shorter = slower per block). A
+# fraction of the rooms, floored and CAPPED so she doesn't blur through a huge terminal — tuned for
+# ~half the earlier pace (roughly a block per two components). The route then SERPENTINES the egg
+# chamber, so its last body-length lies inside the chamber and her whole body coils onto the floor.
+PATH_FRAC, PATH_MIN, PATH_CAP = 0.05, 6, 10   # how far she WANDERS before beelining to the nest;
+                                              # the trip down to the bottom chamber adds to this, so
+                                              # a taller maze is naturally a bit longer (size-dependent)
 GEN_TRIES = 60                     # path attempts; keep the best-length winding route
 FISH_MIN_W, FISH_MAX_W = 3, 6      # only basins this many blocks wide get fish
 
@@ -124,7 +138,7 @@ class MazeSim:
         cc0 = (self.gw - cw) // 2
         cr0 = self.gh - ch
         self.chamber_rooms = {(r, c) for r in range(cr0, cr0 + ch) for c in range(cc0, cc0 + cw)}
-        entrance = (cr0, cc0 + cw // 2)            # the room the path arrives at (top-centre of chamber)
+        entrance = (cr0, cc0)                      # the room the path arrives at (a top corner)
 
         # 1) plan the bigger open CHAMBERS up front (rooms reserved, each with ONE chosen opening —
         # high => a water-holding basin, low => it just drains), so the path + maze go around them.
@@ -134,17 +148,16 @@ class MazeSim:
         # 2) THE PATH: a winding self-avoiding route from a top edge to the chamber entrance, kept out
         # of the chambers until it's wandered enough, tuned to a good (now shorter, slower) length.
         rooms = self.gw * self.gh
-        lo, hi = int(rooms * PATH_LO), int(rooms * PATH_HI)
+        target = max(PATH_MIN, min(PATH_CAP, int(rooms * PATH_FRAC)))
         starts = [(0, c) for c in range(self.gw) if (0, c) not in avoid]
-        best = None
-        for _ in range(GEN_TRIES):
-            start = starts[rng.randrange(len(starts))]
-            p = self._walk(start, entrance, lo, avoid)
-            if p and (best is None or _closer(len(p), lo, hi, len(best))):
-                best = p
-                if lo <= len(p) <= hi:
-                    break
-        self.path_rooms = best or self._walk(starts[0], entrance, 0, avoid) or [entrance]
+        self.path_rooms = None
+        for _ in range(GEN_TRIES):                             # wander ~target rooms, then beeline in
+            p = self._walk(starts[rng.randrange(len(starts))], entrance, target, avoid)
+            if p:
+                self.path_rooms = p
+                break
+        if self.path_rooms is None:
+            self.path_rooms = self._walk(starts[0], entrance, 0, avoid) or [entrance]
         for a, b in zip(self.path_rooms, self.path_rooms[1:]):
             self._carve(a, b)
 
@@ -188,6 +201,8 @@ class MazeSim:
         self._build_route(entrance, cr0, cc0, cw, ch)
         self._place_eggs(cr0, cc0, cw, ch)
         self._compute_basins()
+        # body: scaled to the route, but never longer than the coil-region so it all fits on the floor
+        self.body = max(BODY_MIN, min(BODY_MAX, len(self.route) // 4, self._cham_route))
 
     def _open_block(self, r, c, bh, bw):
         for cr in range(2 * r + 1, 2 * (r + bh - 1) + 2):
@@ -217,7 +232,10 @@ class MazeSim:
             if not nb:
                 stack.pop()
                 continue
-            nxt = nb[rng.randrange(len(nb))]
+            if len(stack) >= want_min:                          # wandered enough -> beeline to the
+                nxt = min(nb, key=lambda n: abs(n[0] - goal[0]) + abs(n[1] - goal[1]))   # nest, so
+            else:                                               # the route length stays near target
+                nxt = nb[rng.randrange(len(nb))]
             stack.append(nxt)
             seen.add(nxt)
         return None
@@ -228,15 +246,27 @@ class MazeSim:
             cells.append(self._room_cell(*a))
             (r1, c1), (r2, c2) = a, b
             cells.append((r1 + r2 + 1, c1 + c2 + 1))
-        cells.append(self._room_cell(*self.path_rooms[-1]))
-        # continue down into the open chamber to the egg cell
-        er, ec = self._room_cell(cr0 + ch - 1, cc0 + cw // 2)     # egg room cell
-        cy, cx = cells[-1]
-        while cy < er:
-            cy += 1
-            cells.append((cy, cx))
-        self.egg_cell = (er, ec)
-        self.route = self._trace(cells)
+        cells.append(self._room_cell(*self.path_rooms[-1]))      # the entrance-corner cell
+        path_chars = self._trace(cells)
+        # into the chamber: descend the corner column, then SERPENTINE only the bottom coil-region
+        # (just enough rows for her body), ending on the FLOOR — so she reaches the bottom and her
+        # whole body coils there, without a long chamber detour that would speed the crawl back up.
+        y0, y1 = 2 * cr0 + 1, 2 * (cr0 + ch - 1) + 1
+        x0, x1 = (2 * cc0 + 1) * CW, (2 * (cc0 + cw - 1) + 1) * CW + CW - 1
+        cwid = min(x1 - x0 + 1, 12)                              # coil this wide (a coil, not a sweep)
+        xr = x0 + cwid - 1
+        need = BODY_MAX + 6
+        kr = min(y1 - y0 + 1, max(2, (need + cwid - 1) // cwid))  # rows of coil needed
+        top_coil = y1 - kr + 1
+        cham = [(y, x0) for y in range(y0 + 1, top_coil) if self.open[y][x0]]  # descend the corner
+        for ri, y in enumerate(range(top_coil, y1 + 1)):         # boustrophedon down to the floor
+            cols = range(x0, xr + 1) if ri % 2 == 0 else range(xr, x0 - 1, -1)
+            for x in cols:
+                if self.open[y][x]:
+                    cham.append((y, x))
+        self.route = path_chars + cham
+        self._cham_route = len(cham)
+        self.egg_end = self.route[-1]
 
     def _trace(self, cells):
         '''Cell list -> per-char centreline (insert a midpoint on 2-wide horizontal steps) for a
@@ -265,13 +295,12 @@ class MazeSim:
         y1 = 2 * (cr0 + ch - 1) + 1
         x0 = (2 * cc0 + 1) * CW                       # char cols == cell col * CW
         x1 = (2 * (cc0 + cw - 1) + 1) * CW + CW - 1
-        floor = y1                                    # bottom row of the chamber
-        mid = (x0 + x1) // 2
+        ey, ex = self.egg_end                         # the nest sits where the crawl ends
         self.eggs = []
-        for dx in (-3, -1, 1, 3, 0, -2, 2):
-            x = mid + dx
-            if 0 <= x < self.W and not self.wall[floor][x]:
-                self.eggs.append((floor, x))
+        for dx in (0, -1, 1, -2, 2, -3, 3):
+            x = ex + dx
+            if x0 <= x <= x1 and not self.wall[ey][x]:
+                self.eggs.append((ey, x))
         self.chamber_box = (y0, y1, x0, x1)
 
     def _plan_chambers(self):
@@ -335,7 +364,13 @@ class MazeSim:
             ch['depth'] = y1 - lowest_opening
             ch['basin'] = ch['depth'] >= 1
             ch['fish'] = ch['basin'] and FISH_MIN_W <= ch['width'] <= FISH_MAX_W
-            ch['phase'] = self.rng.uniform(0, 6.28)
+            ch['fishes'] = []
+            if ch['fish']:
+                fits = [i for i in range(len(FISH_RIGHT)) if len(FISH_RIGHT[i]) <= x1 - x0]
+                for k in range(max(1, ch['width'] // 2)):
+                    i = (fits or range(len(FISH_RIGHT)))[self.rng.randrange(len(fits) or len(FISH_RIGHT))]
+                    ch['fishes'].append({'r': FISH_RIGHT[i], 'l': FISH_LEFT[i], 'row': k,
+                                         'phase': self.rng.uniform(0, 6.28)})
 
     # -- runtime ----------------------------------------------------------
 
@@ -350,26 +385,19 @@ class MazeSim:
 
     @property
     def arrived(self):
-        return self._cursor >= (1.0 - ENDING_FRAC) - 1e-3
+        '''Her head has reached the eggs (the tail may still be coiling in — hearts start now).'''
+        return self.head_index() >= len(self.route) - 1 - 1e-6
 
     @property
     def filled(self):
         return self._cursor >= 0.999
 
     def head_index(self):
-        '''Float index of the head along self.route (0..len-1). The crawl uses all but the last
-        ENDING_FRAC of progress; the tail of the run is the happy ending at the eggs.'''
+        '''Float head index along self.route (0 .. len-1). The head reaches the eggs a touch before
+        the very end (all but the last ENDING_FRAC of progress); since the route's tail serpentines
+        the chamber, her whole body is on the floor by then, and the hearts play out the rest.'''
         t = min(1.0, self._cursor / max(1e-6, 1.0 - ENDING_FRAC))
         return t * (len(self.route) - 1)
-
-
-def _closer(n, lo, hi, cur):
-    '''Is length n a better fit for [lo,hi] than cur? Prefer in-range, else nearer the band.'''
-    def score(x):
-        if lo <= x <= hi:
-            return 0
-        return min(abs(x - lo), abs(x - hi))
-    return score(n) < score(cur)
 
 
 class MazeSplash(Splash):
@@ -441,14 +469,17 @@ class MazeSplash(Splash):
                         self._add(y, x, '█' if y > surf else '▆', self._water)
             if not ch['fish']:
                 continue
-            span = max(1, ch['x1'] - ch['x0'] - 1)
+            span = ch['x1'] - ch['x0'] + 1
             depth = max(1, y1 - surf + 1)
-            for k in range(max(1, ch['width'] // 2)):        # a fish or three, by width
-                t = frame.elapsed * 1.1 + ch['phase'] + k * 2.1
-                fx = int(ch['x0'] + 1 + (0.5 + 0.5 * math.sin(t)) * (span - 1))
-                fy = surf + (k % depth)
-                if 0 <= fy < sim.H and 0 <= fx < sim.W and sim.open[fy][fx]:
-                    self._add(fy, fx, '►' if math.cos(t) >= 0 else '◄', self._fishc)
+            for fk in ch['fishes']:                          # ocean-style fish paddling about
+                t = frame.elapsed * 0.9 + fk['phase']
+                glyph = fk['r'] if math.cos(t) >= 0 else fk['l']
+                fy = surf + (fk['row'] % depth)
+                fx = int(ch['x0'] + (0.5 + 0.5 * math.sin(t)) * max(0, span - len(glyph)))
+                for i, gch in enumerate(glyph):
+                    gx = fx + i
+                    if 0 <= fy < sim.H and ch['x0'] <= gx <= ch['x1'] and sim.open[fy][gx]:
+                        self._add(fy, gx, gch, self._fishc)
 
     def _draw_eggs(self, frame):
         sim = self.sim
@@ -469,16 +500,15 @@ class MazeSplash(Splash):
     def _draw_centipede(self, frame):
         sim = self.sim
         route = sim.route
-        head = sim.head_index()
         n = len(route)
-        body = max(BODY_MIN, min(BODY_MAX, n // 4))
-        hi = int(head)
-        # segments from head back along the route
+        body = sim.body
+        hi = int(sim.head_index())
         wig = frame.elapsed * 9.0
         for s in range(body):
             idx = hi - s
             if idx < 0:
-                break
+                continue                 # this segment hasn't emerged from the top edge yet
+            idx = min(n - 1, idx)        # past the route end: the body coils onto the eggs
             y, x = route[idx]
             if s == 0:
                 self._add(y, x, CENT_HEAD, self._cent[2])
@@ -486,7 +516,7 @@ class MazeSplash(Splash):
                 ay = y - 1
                 if ay >= 0:
                     self._add(ay, x, LEGS[int(wig) % 2], self._cent[1])
-            elif s == body - 1 or idx == 0:
+            elif s == body - 1:
                 self._add(y, x, CENT_TAIL, self._cent[1])
             else:
                 shade = self._cent[1 + (int(wig + s) % 2)]   # a peristalsis ripple down the body
