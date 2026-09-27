@@ -175,3 +175,16 @@ def test_reaches_the_eggs_at_full_progress():
             break
     assert sim.filled and sim.arrived
     assert int(sim.head_index()) == len(sim.route) - 1     # head is home at the nest
+
+
+def test_glyphs_stay_in_common_monospace_coverage():
+    # Every drawn glyph must come from ranges stock monospace fonts (Fira Mono, DejaVu Sans Mono)
+    # actually carry. A glyph from e.g. Symbols for Legacy Computing or Dingbats is drawn from a
+    # fallback font with other metrics — oversized, and the brick rows stop lining up.
+    ok = [(0x20, 0x7E), (0xA0, 0xFF), (0x2500, 0x257F), (0x2580, 0x259F), (0x25A0, 0x25FF),
+          (0x2665, 0x2665), (0x02DA, 0x02DA), (0x2039, 0x203A)]   # ♥, ˚, ‹ ›
+    glyphs = (maze.BRICK_L + maze.BRICK_R + maze.CENT_HEAD + maze.CENT_BODY + maze.CENT_TAIL
+              + ''.join(maze.LEGS) + maze.EGG + ''.join(maze.EGG_JIGGLE) + maze.HEART
+              + ''.join(maze.SPARKLE) + ''.join(maze.FISH_RIGHT) + ''.join(maze.FISH_LEFT))
+    bad = sorted({ch for ch in glyphs if not any(lo <= ord(ch) <= hi for lo, hi in ok)})
+    assert not bad, f'glyphs outside common monospace coverage: {bad}'

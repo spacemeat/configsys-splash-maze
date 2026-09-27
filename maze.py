@@ -27,26 +27,32 @@ import math
 from configsys.plugins import Splash
 
 # -- glyphs -------------------------------------------------------------------
-BRICK_L, BRICK_R = '🬗', '🬤'        # the two halves of one brick, drawn side by side
+# Only glyphs a stock monospace font (e.g. Fira Mono, Pop!_OS's default) actually has: a missing
+# glyph is drawn from a fallback font with other metrics — oversized, and rows stop lining up.
+# A brick is two cells of BRICK colour (the bg) with its mortar as the fg: the bed joint is an
+# UNDERLINE (drawn by the terminal itself, so it's uniform on any font) and the head joint a
+# left-eighth bar at the brick's left edge.
+BRICK_L, BRICK_R = '▏', ' '         # the two halves of one brick, drawn side by side
 CENT_HEAD = '◉'                    # the centipede's head
 CENT_BODY = '●'                    # a body segment
 CENT_TAIL = '◗'                    # the tail tip
 LEGS = ('╱', '╲')                  # little legs, alternated for a crawl
 EGG = '○'
-EGG_JIGGLE = ('○', '◌', '◯')       # egg quiver frames
+EGG_JIGGLE = ('○', 'o', '◯')       # egg quiver frames
 HEART = '♥'
-SPARKLE = ('✦', '✧', '⋆')
+SPARKLE = ('*', '+', '˚')
 
 # Fish (from configsys-splash-ocean): [tail bracket][taper tri][1-3 body][head tri]; the head points
-# the swim direction. Two sizes (big ■/◀▶, small ▪/◄►) and assorted ornamental tail brackets.
-_TAILS = ('❨❩', '❪❫', '❬❭', '❮❯', '❰❱', '❲❳', '❴❵')
-_FISH_SIZES = (('■', '◀', '▶'), ('▪', '◄', '►'))
+# the swim direction. Two sizes (big ■, small ▪; ◄► either way) and assorted tails — the forked end
+# of a bracket pair, as in the classic ><> fish.
+_TAILS = ('<>', '«»', '‹›', '()', '{}')
+_FISH_SIZES = (('■', '◄', '►'), ('▪', '◄', '►'))
 FISH_RIGHT, FISH_LEFT = [], []
 for _b, _lt, _rt in _FISH_SIZES:
     for _n in (1, 2, 3):
         for _ob, _cb in _TAILS:
-            FISH_RIGHT.append(_cb + _lt + _b * _n + _rt)   # ❩◀■▶  tail, taper, body, head
-            FISH_LEFT.append(_lt + _b * _n + _rt + _ob)    # ◄▪►❰
+            FISH_RIGHT.append(_cb + _lt + _b * _n + _rt)   # »◄■►  tail, taper, body, head
+            FISH_LEFT.append(_lt + _b * _n + _rt + _ob)    # ◄▪►«
 FISH_RIGHT, FISH_LEFT = tuple(FISH_RIGHT), tuple(FISH_LEFT)
 
 # -- geometry -----------------------------------------------------------------
@@ -444,8 +450,9 @@ class MazeSplash(Splash):
             wander = max(WANDER_MIN, min(int(gw * gh * WANDER_MAX_FRAC),
                                          round(total / COMPONENTS_PER_WANDER_ROOM)))
         self.sim = MazeSim(self.w, self.h, rng, wander=wander)
-        self._brick = pal.rgb_pair((150, 54, 40), (108, 104, 98))
-        self._brick_grey = pal.rgb_pair((120, 120, 126), (96, 96, 100))
+        # fg = mortar, bg = brick (see BRICK_L); the underline is the bed joint
+        self._brick = pal.rgb_pair((108, 104, 98), (150, 54, 40)) | curses.A_UNDERLINE
+        self._brick_grey = pal.rgb_pair((96, 96, 100), (120, 120, 126)) | curses.A_UNDERLINE
         hue = rng.random()
         self._cent = [pal.rgb_attr(_hsv(hue, 0.75, v)) | curses.A_BOLD for v in (0.55, 0.75, 0.95)]
         self._legs = pal.rgb_attr(_hsv(hue, 0.5, 0.7))
