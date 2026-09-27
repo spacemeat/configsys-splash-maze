@@ -453,7 +453,8 @@ class MazeSplash(Splash):
         self._egg_warm = pal.rgb_attr((250, 214, 160)) | curses.A_BOLD
         self._heart = pal.rgb_attr((240, 120, 140)) | curses.A_BOLD
         wr, wg, wb = _hsv(rng.uniform(0.5, 0.62), 0.7, 0.9)
-        self._water = pal.rgb_attr((wr, wg, wb))
+        self._water = pal.rgb_attr((wr, wg, wb))                # the ▆ surface, over the default bg
+        self._water_full = pal.rgb_pair((wr, wg, wb), (wr, wg, wb))   # fg == bg: no font-gap scanlines
         self._fishc = pal.rgb_pair(_hsv(rng.uniform(0.05, 0.15), 0.7, 0.95), (wr // 3, wg // 3, wb // 3)) | curses.A_BOLD
         self._label_attr = pal.get('title') | curses.A_BOLD
         self._bake_walls()
@@ -498,7 +499,10 @@ class MazeSplash(Splash):
             for y in range(surf, y1 + 1):
                 for x in range(ch['x0'], ch['x1'] + 1):
                     if sim.open[y][x]:
-                        self._add(y, x, '█' if y > surf else '▆', self._water)
+                        if y > surf:
+                            self._add(y, x, '█', self._water_full)
+                        else:
+                            self._add(y, x, '▆', self._water)
             if not ch['fish']:
                 continue
             span = ch['x1'] - ch['x0'] + 1
